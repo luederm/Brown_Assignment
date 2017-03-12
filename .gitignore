@@ -6,4 +6,4 @@ __init__.py
 *.sam
 __pycache__/
 .Rhistory
-
+.idea/

@@ -1,21 +1,36 @@
+'''
+Author: Matthew Lueder
+Description: This is my solution to an assignment given to me by Brown's CBC. It is a pipeline
+    which takes PE reads and aligns calculates their coverage on a given reference genome.
+'''
 import subprocess
-import os
 import luigi
-from luigi import mock
+import psutil
 
 class Read():
     '''
         Represents a sequencing read. Constructed from lines of fastq file.
     '''
     def __init__(self, seqID, seq, quality):
-        self.seqID = seqID.trim()
-        self.seq = seq.trim()
-        self.quality = seq.trim()
+        self.seqID = seqID.strip()
+        self.seq = seq.strip()
+        self.quality = seq.strip()
 
     def phred33ToQ(self, char):
         ''' Convert a phred 33 encoded character to quality score '''
         return ord(char) - 33
 
+    def averageQuality(self):
+        ''' Returns the average quality of the read '''
+        qSum = 0
+        for basePh33 in self.quality:
+            qSum += self.phred33ToQ(basePh33)
+
+        return qSum / len(self.quality)
+
+    def txt(self):
+        ''' Returns text representation fit for fastq file '''
+        return "%s\n%s\n+\n%s" % (self.seqID, self.seq, self.quality)
 
 
 class FilterReads(luigi.Task):
@@ -25,13 +40,40 @@ class FilterReads(luigi.Task):
     r1 = luigi.Parameter()
     r2 = luigi.Parameter()
     t = luigi.IntParameter()
-    q = luigi.IntParameter()
+    Q = luigi.IntParameter(default=0)
 
     def requires(self):
         return []
 
     def output(self):
         return [luigi.LocalTarget('r1.filt.fastq'), luigi.LocalTarget('r2.filt.fastq')] #TODO: base filenames off r1 and r2 parameters
+
+    def run(self):
+        if Q > 41 or Q < 0:
+            raise ValueError("Invalid value for parameter Q (should be an int between 0 and 41)")
+
+        inputPaths = [self.r1, self.r2]
+        for i in [0,1]:
+            with open(inputPaths[i], 'r') as fqFile:
+                with self.output()[i].open('w') as filtFqFile:
+                    eofReached = False
+                    reads = []
+                    threshold = 10 * 1024 * 1024  # 10MB - amount of memory not to go under
+                    while not eofReached:
+                        # Read fastq into mem until out of mem
+                        while psutil.virtual_memory().available > threshold:
+                            id = fqFile.readline()
+                            seq = fqFile.readline()
+                            fqFile.readline()
+                            qual = fqFile.readline()
+                            if len(seq) == 0:
+                                eofReached = True
+                                break
+                            reads.append(Read(id, seq, qual))
+
+                        for read in reads:
+                            if read.averageQuality() > self.Q:
+                                filtFqFile.write(read.txt() + '\n')
 
 
 class Index(luigi.Task):
