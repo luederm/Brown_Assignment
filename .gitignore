@@ -1,0 +1,9 @@
+*.csv
+*.tsv
+__init__.py
+*.fastq
+*.bam
+*.sam
+__pycache__/
+.Rhistory
+
