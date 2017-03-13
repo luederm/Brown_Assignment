@@ -14,7 +14,7 @@ class Read():
     def __init__(self, seqID, seq, quality):
         self.seqID = seqID.strip()
         self.seq = seq.strip()
-        self.quality = seq.strip()
+        self.quality = quality.strip()
 
     def phred33ToQ(self, char):
         ''' Convert a phred 33 encoded character to quality score '''
@@ -39,7 +39,6 @@ class FilterReads(luigi.Task):
     '''
     r1 = luigi.Parameter()
     r2 = luigi.Parameter()
-    t = luigi.IntParameter()
     Q = luigi.IntParameter(default=0)
 
     def requires(self):
@@ -49,7 +48,9 @@ class FilterReads(luigi.Task):
         return [luigi.LocalTarget('r1.filt.fastq'), luigi.LocalTarget('r2.filt.fastq')] #TODO: base filenames off r1 and r2 parameters
 
     def run(self):
-        if Q > 41 or Q < 0:
+        print("*** Filtering reads with lower mean quality than Q ***")
+
+        if self.Q > 41 or self.Q < 0:
             raise ValueError("Invalid value for parameter Q (should be an int between 0 and 41)")
 
         inputPaths = [self.r1, self.r2]
@@ -57,9 +58,9 @@ class FilterReads(luigi.Task):
             with open(inputPaths[i], 'r') as fqFile:
                 with self.output()[i].open('w') as filtFqFile:
                     eofReached = False
-                    reads = []
                     threshold = 10 * 1024 * 1024  # 10MB - amount of memory not to go under
                     while not eofReached:
+                        reads = []
                         # Read fastq into mem until out of mem
                         while psutil.virtual_memory().available > threshold:
                             id = fqFile.readline()
@@ -89,7 +90,7 @@ class Index(luigi.Task):
         return [luigi.LocalTarget(str(self.x) + ft) for ft in ['.amb', '.ann', '.bwt', '.fai', '.pac', '.sa']]
 
     def run(self):
-        print("Indexing reference with BWA and SAMtools...")
+        print("*** Indexing reference with BWA and SAMtools... ***")
         subprocess.run(['bwa', 'index', '-a', 'bwtsw', self.x])
         subprocess.run(['samtools', 'faidx', self.x])
 
@@ -102,16 +103,19 @@ class AlignToRefGenome(luigi.Task):
     r2 = luigi.Parameter()
     x = luigi.Parameter()
     t = luigi.IntParameter()
+    Q = luigi.IntParameter(default=0)
 
     def requires(self):
-        return [Index(x = self.x)]
+        return [Index(x = self.x), FilterReads(r1 = self.r1, r2 = self.r2, Q = self.Q)]
 
     def output(self):
         return luigi.LocalTarget("alignment.bam")
 
     def run(self):
-        print("Aligning reads to reference genome with BWA-MEM...")
+        print("*** Aligning reads to reference genome with BWA-MEM... ***")
         bwaOut = subprocess.Popen(['bwa', 'mem', '-t', str(self.t), self.x, self.r1, self.r2], stdout=subprocess.PIPE)
+        '''self.input()[1][0].fn,
+                                   self.input()[1][0].fn], stdout=subprocess.PIPE)'''
         samToBam = subprocess.Popen(['samtools', 'view', '-b', '-o', 'alignment.bam'], stdin=bwaOut.stdout)
         samToBam.wait()
 
@@ -124,15 +128,16 @@ class SortBAM(luigi.Task):
     r2 = luigi.Parameter()
     x = luigi.Parameter()
     t = luigi.IntParameter()
+    Q = luigi.IntParameter(default=0)
 
     def requires(self):
-        return [AlignToRefGenome(r1 = self.r1, r2 = self.r2, x = self.x, t = self.t)]
+        return [AlignToRefGenome(r1 = self.r1, r2 = self.r2, x = self.x, t = self.t, Q = self.Q)]
 
     def output(self):
         return luigi.LocalTarget("alignment.sort.bam")
 
     def run(self):
-        print("Sorting BAM file...")
+        print("*** Sorting BAM file... ***")
         subprocess.run(['samtools', 'sort', '-o', 'alignment.sort.bam', '--threads', str(self.t), self.input()[0].fn])
 
 
@@ -148,9 +153,10 @@ class CalcCoverage(luigi.Task):
     r2 = luigi.Parameter()
     x = luigi.Parameter()
     t = luigi.IntParameter()
+    Q = luigi.IntParameter(default=0)
 
     def requires(self):
-        return [SortBAM(r1 = self.r1, r2 = self.r2, x = self.x, t = self.t)]
+        return [SortBAM(r1 = self.r1, r2 = self.r2, x = self.x, t = self.t, Q = self.Q)]
 
     def output(self):
         return [luigi.LocalTarget("coverage.tsv"), luigi.LocalTarget("base_anova.csv"),
@@ -166,8 +172,10 @@ class CalcCoverage(luigi.Task):
             raise subprocess.CalledProcessError(return_code, cmd)
 
     def run(self):
+        print("*** Determining coverage... ***")
         with self.output()[0].open('w') as coverage_tsv:
             coverage_tsv.truncate()
+            coverage_tsv.write('"Ref.pos"\t"Coverage"\n')
             perBaseCov = {'G': [], 'C': [], 'T': [], 'A': []}
             i = 1
             averageGC = []
@@ -183,18 +191,18 @@ class CalcCoverage(luigi.Task):
                 if str.upper(baseDat[2]) in ('G', 'C', 'T', 'A'):
                     perBaseCov[str.upper(baseDat[2])].append(int(baseDat[3]))
 
-                # Count the number of G/C bases (for every 100 bases)
+                # Count the number of G/C bases (for every 20 bases)
                 if baseDat[2] in ('G', 'C'):
                     GC_sum += 1
 
-                # Sum the coverage for each base (for every 100 bases)
+                # Sum the coverage for each base (for every 20 bases)
                 cov_sum += int(baseDat[3])
 
-                # Save average GC% and coverage for every 100 bases
-                if (i % 100 == 0):
-                    averageGC.append(GC_sum / 100)
+                # Save average GC% and coverage for every 20 bases
+                if (i % 20 == 0):
+                    averageGC.append(GC_sum / 20)
                     GC_sum = 0
-                    averageCov.append(cov_sum / 100)
+                    averageCov.append(cov_sum / 20)
                     cov_sum = 0
 
                 i += 1
@@ -206,27 +214,68 @@ class CalcCoverage(luigi.Task):
                         base_stats.write("%s,%i\n" % (base, cov))
 
             with self.output()[2].open('w') as gc_stats:
-                gc_stats.write('"avg.GC%","avg.cov"\n')
+                gc_stats.write('"avg.GC","avg.cov"\n')
                 for i in range(0, len(averageCov)):
                     gc_stats.write("%f,%f\n" % (averageGC[i], averageCov[i]))
 
-'''
-# Example
-os.chdir("/home/luederm/Desktop/Brown-Assignment")
-coverage_tsv = open('coverage.tsv', 'w')
-coverage_tsv.truncate()
-totalCov = {'G':0, 'C':0, 'T':0, 'A':0}
-numBases = {'G':0, 'C':0, 'T':0, 'A':0}
-for baseDat in execute(["samtools", "mpileup", "-f", "Ref/ref.fasta", "-R", "alignment.sort.bam"]):
-    baseDat = baseDat.split('\t')
-    coverage_tsv.write("%s\t%s\n" % (baseDat[1], baseDat[3]))
-    totalCov[baseDat[2]] += int(baseDat[3])
-    numBases[baseDat[2]] += 1
 
-for base in ['G', 'C', 'T', 'A']:
-    print(base)
-    print(totalCov[base])
-    print(numBases[base])
-    print(totalCov[base] / numBases[base])
-    print('\n')
-'''
+class GenerateCoveragePlot(luigi.Task):
+    '''
+        Make a graph of coverage over base position using R and ggplot2
+    '''
+    r1 = luigi.Parameter()
+    r2 = luigi.Parameter()
+    x = luigi.Parameter()
+    t = luigi.IntParameter()
+    Q = luigi.IntParameter(default=0)
+
+    def requires(self):
+        return [CalcCoverage(r1 = self.r1, r2 = self.r2, x = self.x, t = self.t, Q = self.Q)]
+
+    def output(self):
+        return luigi.LocalTarget("coverage.pdf")
+
+    def run(self):
+        print("*** Creating coverage plot ***")
+        subprocess.run(['Rscript', 'Create_coverage_plot.R'])
+
+
+class GenerateCorrelationReport(luigi.Task):
+    '''
+        Generate a report which explores correlation between sequence content and coverage
+    '''
+    r1 = luigi.Parameter()
+    r2 = luigi.Parameter()
+    x = luigi.Parameter()
+    t = luigi.IntParameter()
+    Q = luigi.IntParameter(default=0)
+    pandoc = luigi.Parameter()
+
+    def requires(self):
+        return [CalcCoverage(r1=self.r1, r2=self.r2, x=self.x, t=self.t, Q=self.Q)]
+
+    def output(self):
+        return luigi.LocalTarget("correlation.html")
+
+    def run(self):
+        print("*** Creating correlation report ***")
+        self.pandoc = '"' + str(self.pandoc) + '"'
+        subprocess.run(['Rscript', '-e', 'library(rmarkdown);' +
+                        'Sys.setenv(RSTUDIO_PANDOC=' + str(self.pandoc) + ');' +
+                        'rmarkdown::render("correlation.Rmd", "html_document")'])
+
+
+class RunAll(luigi.Task):
+    '''
+        Execute all tasks
+    '''
+    r1 = luigi.Parameter()
+    r2 = luigi.Parameter()
+    x = luigi.Parameter()
+    t = luigi.IntParameter()
+    Q = luigi.IntParameter(default=0)
+    pandoc = luigi.Parameter()
+
+    def requires(self):
+        return [GenerateCorrelationReport(r1=self.r1, r2=self.r2, x=self.x, t=self.t, Q=self.Q, pandoc = self.pandoc),
+                GenerateCoveragePlot(r1=self.r1, r2=self.r2, x=self.x, t=self.t, Q=self.Q)]
